@@ -4,28 +4,27 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-OPTIND=1         # Reset in case getopts has been used previously in the shell.
+OPTIND=1 # Reset in case getopts has been used previously in the shell.
 
 # Initialize our own variables:
-left_file=""
-right_file=""
-output_dir="kfolds"
+left_file=''
+right_file=''
+output_dir='kfolds'
 delete_orig=0
-seed=""
+seed=''
 k=0
-while getopts "h?dl:r:s:o:k:" opt; do 
+while getopts 'h?dl:r:s:o:k:' opt; do 
     case "$opt" in
         h|\?)
-            echo "Randomly shuffle and distribute a pair of fasta files into k folds"
-            echo "usage: kfolds.sh -l <file> -r <file> -o <directory> -k <int> [-h <file> -f -d -s <string>]"
-            echo "IMPORTANT - the output directory will be completely deleted when running!"
-            echo "-h    print this help message"
-            echo "-l    the left file (1)"
-            echo "-r    the right file (2), in the same directory as the left file"
-            echo "-k    the number of partitions to make"
-            echo "-o    the output directory to save to (default ./kfolds)"
-            echo "-f    refresh (overwrite output files)"
-            echo "-d    delete input files when done"
+            echo 'Randomly shuffle and distribute a pair of fasta files into k folds'
+            echo 'usage: kfolds.sh -l <file> -r <file> -o <directory> -k <int> [-h <file> -f -d -s <string>]'
+            echo 'IMPORTANT - the output directory will be completely deleted when running!'
+            echo '-h    print this help message'
+            echo '-l    the left file (1)'
+            echo '-r    the right file (2), in the same directory as the left file'
+            echo '-k    the number of partitions to make'
+            echo '-o    the output directory to save to (default ./kfolds)'
+            echo '-d    delete input files when done'
             echo "-s    shuffle with a seed (ex: -s 'seed')" # internally through random source and echo
             exit 0
             ;;
@@ -70,7 +69,7 @@ fl=${base_left%*.fasta}
 fr=${base_right%*.fasta}
 
 # to avoid deleting everything in root
-#rm -r "${output_dir:?}"
+# rm -r "${output_dir:?}"
 test_dir="$output_dir/test"
 train_dir="$output_dir/train"
 tmp_dir="$output_dir/tmp"
@@ -123,20 +122,24 @@ cmd="paste $left_file $right_file | paste - - | shuf $rand_source |
 eval "$cmd"
 
 # copy the partitions into the correct folders
-# one extra iteration is not a big deal in the long run
+# use & to send process to background and speed up copying
 for ((i = 1; i < k+1; i++)); do
     echo "Making fold $i of $k"
-    cp "${tmp_dir}/part${i}_1.fasta" "${test_dir}/$i/${fl}_1.fasta"
-    cp "${tmp_dir}/part${i}_2.fasta" "${test_dir}/$i/${fr}_2.fasta"
+    cp "${tmp_dir}/part${i}_1.fasta" "${test_dir}/$i/${fl}.fasta"
+    cp "${tmp_dir}/part${i}_2.fasta" "${test_dir}/$i/${fr}.fasta"
     # find returns a different order every time
     # replace all instances of 1.fasta with 2.fasta to ensure the reads are in the same order
     trainsetone=$(find "$tmp_dir" -type f \( -name '*_1.fasta' -a ! -name "part${i}_1.fasta" \))
     trainsettwo="${trainsetone//1\.fasta/2\.fasta}"
     # confusingly, the > is the redirect *after* 'xargs cat'
-    echo "$trainsetone" | xargs cat > "${train_dir}/$i/${fl}_1.fasta"
-    echo "$trainsettwo" | xargs cat > "${train_dir}/$i/${fr}_2.fasta"
+    echo "$trainsetone" | xargs cat > "${train_dir}/$i/${fl}.fasta"
+    echo "$trainsettwo" | xargs cat > "${train_dir}/$i/${fr}.fasta"
 done
 
+# echo "Waiting for copies to finish..."
+# wait # for them to finish
+echo "Done!"
+echo "Removing temp files"
 # delete the temporary files
 rm -r "${tmp_dir:?}"
 

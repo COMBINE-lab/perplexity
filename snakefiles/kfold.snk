@@ -1,0 +1,36 @@
+from os.path import join
+
+out_dir = config['out-dir']
+reads_dir = config['reads-dir']
+NAMES = config['sample-names']
+
+raw_reads_fmt = join(reads_dir, '{{name}}', '{{name}}_{end}.fasta')
+L_reads_fmt = raw_reads_fmt.format(end=1)
+R_reads_fmt = raw_reads_fmt.format(end=2)
+
+output_dir_fmt = raw_reads_fmt = join(out_dir, 'folds', '{name}')
+SEED = 2021
+
+rule all:
+    input:
+        expand(output_dir_fmt, name=NAMES)
+
+rule kfold:
+    input:
+        l=L_reads_fmt,
+        r=R_reads_fmt,
+        bin=config['kfold-script']
+    output:
+        directory(output_dir_fmt)
+    params:
+        k=config['k'],
+        seed=SEED
+    shell:
+        '''
+        ./{input.bin} \
+            -l {input.l} \
+            -r {input.r} \
+            -k {params.k} \
+            -s {params.seed} \
+            -o {output}
+        '''

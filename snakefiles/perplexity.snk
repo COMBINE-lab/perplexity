@@ -1,0 +1,126 @@
+from os.path import join
+
+### Quantify
+OUTPUT_DIR = config['out-dir']
+READS_DIR = join(OUTPUT_DIR, 'folds')
+
+SAMPLES_NAMES = config['sample-names']
+
+TX_PATH = config['txome-path']
+TX_INDEX = join(OUTPUT_DIR, 'salmon_index')
+
+QUANTS_DIR = join(OUTPUT_DIR, 'quants')
+
+reads_1_fmt = join(READS_DIR, '{sample_name}', 'train', '{k}', '{sample_name}_1.fasta')
+reads_2_fmt = join(READS_DIR, '{sample_name}',  'train', '{k}', '{sample_name}_2.fasta')
+
+test_reads_1_fmt = join(READS_DIR, '{sample_name}', 'test', '{k}', '{sample_name}_1.fasta')
+test_reads_2_fmt = join(READS_DIR, '{sample_name}',  'test', '{k}', '{sample_name}_2.fasta')
+
+quant_dir_fmt = join(QUANTS_DIR, '{sample_name}','{k}')
+eq_classes_gz_fmt = join(quant_dir_fmt, 'aux_info', 'eq_classes.txt.gz')
+quant_file_fmt = join(quant_dir_fmt, 'quant.sf')
+
+test_ecs_dir_fmt = join(OUTPUT_DIR, 'test-ecs', '{sample_name}', '{k}')
+test_ecs_fmt = join(test_ecs_dir_fmt, 'aux_info', 'eq_classes.txt.gz')
+
+perplexity_dir = join(OUTPUT_DIR, 'perplexity')
+perplexity_fmt = join(perplexity_dir, '{sample_name}', '{k}', 'perplexity.yml')
+
+N_folds = config['k']
+
+PERPLEXITY = config['perplexity-bin']
+
+_FOLDS = range(1, N_folds+1)
+
+rule perplexity:
+    input:
+        expand(perplexity_fmt, sample_name=SAMPLES_NAMES, k=_FOLDS)
+
+rule quant:
+    input:
+        expand(eq_classes_gz_fmt, sample_name=SAMPLES_NAMES, k=_FOLDS),
+        expand(quant_file_fmt, sample_name=SAMPLES_NAMES, k=_FOLDS),
+
+rule test_ecs:
+    input:
+        expand(test_ecs_fmt,sample_name=SAMPLES_NAMES, k=_FOLDS)
+
+rule _perplexity:
+    input:
+        train_quant = quant_file_fmt,
+        train_ecs = eq_classes_gz_fmt,
+        test_ecs = test_ecs_fmt
+    output:
+        perplexity_fmt,
+    shell:
+        '''
+        {PERPLEXITY} eval \
+            --output {output} \
+            --train_ecs {input.train_ecs} \
+            --quants {input.train_quant} \
+            --test_ecs {input.test_ecs} \
+        '''
+        
+###
+# SALMON params
+# `--dumpEqWeights` to dump equivalence class file
+# `--rangeFactorizationBins 1` to use traditional rich eq classes
+rule _quant:
+    input:
+        mate1=reads_1_fmt,
+        mate2=reads_2_fmt,
+        index=TX_INDEX
+    output:
+        # Snakemake does not like that this directory is substring of output of unzip?        
+        #outdir = directory(quant_dir_fmt),
+        eq_classes_gz=eq_classes_gz_fmt,
+        quants=quant_file_fmt
+    params:
+        cores = config.get('salmon_cores', 8),
+        outdir = directory(quant_dir_fmt),
+        range_fac = '' if config.get('range_fac', True) \
+                       else '--rangeFactorizationBins 1'
+    shell:
+        '''
+        salmon quant -i {input.index} -l A \
+            -1 {input.mate1} \
+            -2 {input.mate2} \
+            -o {params.outdir} \
+            {params.range_fac} \
+            -p {params.cores} \
+            --validateMappings \
+            --dumpEqWeights
+        '''
+
+rule _test_ecs:
+    input:
+        mate1=test_reads_1_fmt,
+        mate2=test_reads_2_fmt,
+        index=TX_INDEX
+    output:
+        ecs=test_ecs_fmt,
+    params:
+        cores = config.get('salmon_cores', 8),
+        outdir = directory(test_ecs_dir_fmt), # sidestepping possible snakemake issue
+    shell:
+        '''
+        salmon quant -i {input.index} -l A \
+            -1 {input.mate1} \
+            -2 {input.mate2} \
+            -o {params.outdir} \
+            -p {params.cores} \
+            --validateMappings \
+            --skipQuant \
+            --dumpEqWeights
+        '''
+
+rule index:
+    input:
+        TX_PATH
+    output:
+        directory(TX_INDEX)
+    shell:
+        '''
+        salmon index -t {input} -i {output}
+        '''
