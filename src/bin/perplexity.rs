@@ -1,18 +1,145 @@
 use seine::salmon::{EqClassCollection, EqClassView, FromPathExt, QuantEntry};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::path::Path;
+use std::path::PathBuf;
 
 use clap::{crate_authors, crate_version, value_t};
-use clap::{App, Arg};
+use clap::{App, Arg, ArgMatches};
 use serde::Serialize;
 use slog::{info, o, Drain};
 use std::fs;
 
-fn main() -> Result<(), serde_yaml::Error> {
+use perplexity::adaptors::{load_express_quants, load_express_txps_w_mapped_reads, ExpressAppInfo};
+use perplexity::smoothing::{PerTPMSmoother, PerTxpSmoother, SGTSmoother, SmoothingStrategy};
+
+/*******************************************************************************/
+// App
+/*******************************************************************************/
+
+fn app() -> App<'static, 'static> {
     let crate_authors = crate_authors!("\n");
     let version = crate_version!();
 
+    let eval_app = App::new("eval")
+        .version(version)
+        .author(crate_authors)
+        .arg(
+            Arg::from_usage("--train_ecs=<train_ecs> 'Training set equivalence class file'")
+                .required(true),
+        )
+        .arg(Arg::from_usage("--quants=<train_ecs> 'Training set quant.sf'").required(true))
+        .arg(
+            Arg::from_usage("--test_ecs=<test_salmon_dir> 'Test set equivalence class file'")
+                .required(true),
+        )
+        .arg(
+            Arg::from_usage("--smoothing=<smoothing> 'Smoothing parameter for various strategies'")
+                .required(false)
+                .default_value("1e-8"),
+        )
+        .arg(
+            Arg::from_usage("-m, --smoothing_strategy=<mode> 'One of {TX, TPM, LGT}'")
+                .required(false)
+                .default_value("TPM"),
+        )
+        .arg(Arg::from_usage("-o --output=<output> 'Write results to output'").required(true));
+
+    let xprs_app = App::new("eval-xprs")
+        .version(version)
+        .author(crate_authors)
+        .arg(Arg::from_usage("--quants=<train_ecs> 'Training set quant.sf'").required(true))
+        .arg(
+            Arg::from_usage("--test_ecs=<test_salmon_dir> 'Test set equivalence class file'")
+                .required(true),
+        )
+        .arg(
+            Arg::from_usage("--smoothing=<smoothing> 'Smoothing parameter for various strategies'")
+                .required(false)
+                .default_value("1e-8"),
+        )
+        .arg(
+            Arg::from_usage("-m, --smoothing_strategy=<mode> 'One of {TX, TPM, LGT}'")
+                .required(false)
+                .default_value("TPM"),
+        )
+        .arg(Arg::from_usage("-o --output=<output> 'Write results to output'").required(true));
+
+    // return the app
+    App::new("perplexity")
+        .version(version)
+        .author(crate_authors)
+        .subcommand(eval_app)
+        .subcommand(xprs_app)
+}
+
+#[derive(Debug, Serialize)]
+struct AppInfo {
+    // Arguments
+    output_path: PathBuf,
+    quant_path: PathBuf,
+    quant_ecs_path: PathBuf,
+    val_ecs_path: PathBuf,
+    smoothing_strategy: String, // TODO maybe an enum?
+    smoothing_param: Option<f64>,
+
+    // Extra stuff
+    auxinfo_path: PathBuf,
+    appinfo_path: PathBuf,
+}
+
+impl AppInfo {
+    fn from_matches(matches: &ArgMatches) -> Self {
+        let output_path = matches.value_of("output").unwrap().to_string();
+
+        let quant_path = matches.value_of("quants").unwrap().to_string();
+        let quant_path = PathBuf::from(&quant_path);
+        let quant_ecs_path = matches.value_of("train_ecs").unwrap().to_string();
+        let quant_ecs_path = PathBuf::from(&quant_ecs_path);
+        let val_ecs_path = matches.value_of("test_ecs").unwrap().to_string();
+        let val_ecs_path = PathBuf::from(&val_ecs_path);
+
+        let smoothing_strategy = matches.value_of("smoothing_strategy").unwrap().to_string();
+
+        let smoothing_param = match smoothing_strategy.as_str() {
+            "TX" | "TPM" => {
+                let param = value_t!(matches.value_of("smoothing"), f64).unwrap();
+                Some(param)
+            }
+            _ => None,
+        };
+
+        let output_path = PathBuf::from(&output_path);
+
+        let prefix = String::from(output_path.file_stem().unwrap().to_str().unwrap());
+
+        let mut auxinfo_filename = prefix.clone();
+        auxinfo_filename.push_str("_auxinfo.csv");
+        let auxinfo_path = output_path.parent().unwrap().join(auxinfo_filename);
+
+        let mut appinfo_filename = prefix.clone();
+        appinfo_filename.push_str("_appinfo.yml");
+        let appinfo_path = output_path.parent().unwrap().join(appinfo_filename);
+
+        Self {
+            output_path,
+            quant_path,
+            quant_ecs_path,
+            val_ecs_path,
+            smoothing_strategy,
+            smoothing_param,
+
+            // Extra stuff
+            auxinfo_path,
+            appinfo_path,
+        }
+    }
+}
+
+/*******************************************************************************/
+// main
+/*******************************************************************************/
+
+fn main() -> Result<(), serde_yaml::Error> {
     // Logging
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::CompactFormat::new(decorator)
@@ -25,112 +152,169 @@ fn main() -> Result<(), serde_yaml::Error> {
     let drain = slog_async::Async::new(drain).build().fuse();
     let log = slog::Logger::root(drain, o!());
 
-    let eval_app = App::new("eval")
-        .version(version)
-        .author(crate_authors)
-        .arg(
-            Arg::from_usage("--train_ecs=<train_ecs> 'Training set equivalence class counts'")
-                .required(true),
-        )
-        .arg(Arg::from_usage("--quants=<train_ecs> 'Training set quants'").required(true))
-        .arg(
-            Arg::from_usage("--test_ecs=<test_salmon_dir> 'Test set equivalence class counts'")
-                .required(true),
-        )
-        .arg(
-            Arg::from_usage("--smoothing=<smoothing> 'TPM based smoothing'")
-                .required(false)
-                // .default_value("1"),
-                .default_value("1e-8"),
-        )
-        .arg(Arg::from_usage(
-            "-t, --smooth_per_tx 'use reads per tx smoothing'",
-        ))
-        .arg(Arg::from_usage("-o --output=<output> 'output results path'").required(true));
+    // App and parse args
+    let app = app();
+    let matches = app.get_matches();
 
-    let opts = App::new("perplexity")
-        .version(version)
-        .author(crate_authors)
-        .subcommand(eval_app)
-        .get_matches();
-
-    if let Some(opts) = opts.subcommand_matches("eval") {
-        let output_file = opts.value_of("output").unwrap().to_string();
-        let train_ecs = opts.value_of("train_ecs").unwrap().to_string();
-        let train_quants = opts.value_of("quants").unwrap().to_string();
-        let test_ecs = opts.value_of("test_ecs").unwrap().to_string();
-        let alpha_smooth = value_t!(opts.value_of("smoothing"), f64).unwrap();
-
-        let smooth_per_tx = opts.is_present("smooth_per_tx");
-
-        let output_file = Path::new(&output_file);
-
-        let mut file_name = String::from(output_file.file_stem().unwrap().to_str().unwrap());
-        file_name.push_str("_auxinfo.csv");
-        let auxinfo_file = output_file.parent().unwrap().join(file_name);
-
-        if smooth_per_tx {
-            info!(log, "Smoothing reads per transcript");
-        } else {
-            info!(log, "Smoothing per TPM";)
-        }
-        let result = perplexity_from_files(
-            &train_quants,
-            &train_ecs,
-            &test_ecs,
-            alpha_smooth,
-            smooth_per_tx,
-            &log,
-        );
+    if let Some(matches) = matches.subcommand_matches("eval") {
+        let app_info = AppInfo::from_matches(&matches);
+        let result = perplexity_from_app_info(&app_info, &log);
         let summary = perplexity_summary(&result);
 
-        info!(log, "{:#?}", &summary);
-
-        info!(log, "Writing auxinfo to: {:?}", &auxinfo_file);
+        info!(log, "Writing auxinfo to: {:?}", &app_info.auxinfo_path);
         let mut wtr = csv::WriterBuilder::new()
             .delimiter(b',')
-            .from_path(auxinfo_file)
+            .from_path(&app_info.auxinfo_path)
             .unwrap();
 
         for record in result.results {
             wtr.serialize(record).unwrap();
         }
 
-        info!(log, "Writing perplexity result to: {:?}", output_file);
+        info!(log, "Writing AppInfo to: {:?}", &app_info.appinfo_path);
+        let app_info_yaml = serde_yaml::to_string(&app_info)?;
+        fs::write(&app_info.appinfo_path, app_info_yaml).expect("Unable to write file");
+        info!(
+            log,
+            "Writing perplexity result to: {:?}", &app_info.output_path
+        );
         let s = serde_yaml::to_string(&summary)?;
-        fs::write(output_file, s).expect("Unable to write file");
+        fs::write(&app_info.output_path, s).expect("Unable to write file");
+
+        info!(log, "# Total validation reads: {:?}", &summary.n_reads);
+        info!(log, "# Impossible reads: {:?}", &summary.n_impossible_reads);
+        info!(log, "# Discarded reads: {:?}", &summary.n_discarded_reads);
+        info!(log, "Perplexity: {:?}", &summary.smoothed_perplexity);
     }
+
+    if let Some(matches) = matches.subcommand_matches("eval-xprs") {
+        let app_info = ExpressAppInfo::from_matches(&matches);
+        let result = perplexity_from_xprs_app_info(&app_info, &log);
+        let summary = perplexity_summary(&result);
+
+        info!(log, "Writing auxinfo to: {:?}", &app_info.auxinfo_path);
+        let mut wtr = csv::WriterBuilder::new()
+            .delimiter(b',')
+            .from_path(&app_info.auxinfo_path)
+            .unwrap();
+
+        for record in result.results {
+            wtr.serialize(record).unwrap();
+        }
+
+        info!(log, "Writing AppInfo to: {:?}", &app_info.appinfo_path);
+        let app_info_yaml = serde_yaml::to_string(&app_info)?;
+        fs::write(&app_info.appinfo_path, app_info_yaml).expect("Unable to write file");
+        info!(
+            log,
+            "Writing perplexity result to: {:?}", &app_info.output_path
+        );
+        let s = serde_yaml::to_string(&summary)?;
+        fs::write(&app_info.output_path, s).expect("Unable to write file");
+
+        info!(log, "# Total validation reads: {:?}", &summary.n_reads);
+        info!(log, "# Impossible reads: {:?}", &summary.n_impossible_reads);
+        info!(log, "# Discarded reads: {:?}", &summary.n_discarded_reads);
+        info!(log, "Perplexity: {:?}", &summary.smoothed_perplexity);
+    }
+
     Ok(())
 }
 
-fn perplexity_from_files<P: AsRef<Path>>(
-    quants: &P,
-    train_ecs: &P,
-    test_ecs: &P,
-    alpha_smooth: f64,
-    smooth_per_tx: bool,
-    log: &slog::Logger,
-) -> EqClassCollectionEval {
-    info!(log, "Loading quants from {:?}", &quants.as_ref());
-    let quant_map = HashMap::<String, QuantEntry>::from_path(&quants).unwrap();
+fn perplexity_from_app_info(app_info: &AppInfo, log: &slog::Logger) -> EqClassCollectionEval {
+    let smoothing_strategy = &app_info.smoothing_strategy;
+    info!(log, "Smoothing strategy {:?}", &smoothing_strategy);
 
-    info!(log, "Loading quantified ECs from {:?}", &train_ecs.as_ref());
-    let tr_ecs = EqClassCollection::from_path(&train_ecs).unwrap();
+    let smoothing_strategy = {
+        match app_info.smoothing_strategy.as_str() {
+            "TX" => {
+                let smoothing_param = app_info.smoothing_param.unwrap();
+                info!(log, "Smoothing parameter {:?}", &smoothing_param);
+                Some(Box::new(PerTxpSmoother::new(smoothing_param)) as Box<dyn SmoothingStrategy>)
+            }
+            "TPM" => {
+                let smoothing_param = app_info.smoothing_param.unwrap();
+                info!(log, "Smoothing parameter {:?}", &smoothing_param);
+                Some(Box::new(PerTPMSmoother::new(smoothing_param)) as Box<dyn SmoothingStrategy>)
+            }
+            "LGT" => Some(Box::new(SGTSmoother::new()) as Box<dyn SmoothingStrategy>),
+            _ => None,
+        }
+    };
 
-    info!(log, "Loading held-out ECs from {:?}", &test_ecs.as_ref());
-    let te_ecs = EqClassCollection::from_path(&test_ecs).unwrap();
+    let smoothing_strategy = smoothing_strategy.unwrap();
+
+    info!(log, "Loading quants from {:?}", &app_info.quant_path);
+    let quant_map = HashMap::<String, QuantEntry>::from_path(&app_info.quant_path).unwrap();
+
+    info!(
+        log,
+        "Loading quantified ECs from {:?}", &app_info.quant_ecs_path
+    );
+    let tr_ecs = EqClassCollection::from_path(&app_info.quant_ecs_path).unwrap();
+    let txs_w_mapped_reads = mapped_txs(&tr_ecs);
+
+    info!(
+        log,
+        "Loading held-out ECs from {:?}", &app_info.val_ecs_path
+    );
+    let te_ecs = EqClassCollection::from_path(&app_info.val_ecs_path).unwrap();
 
     let ec_eval_results = perplexity(
         te_ecs,
         &quant_map,
-        &tr_ecs,
-        alpha_smooth,
-        smooth_per_tx,
+        &txs_w_mapped_reads,
+        smoothing_strategy.as_ref(),
         &log,
     );
     ec_eval_results
 }
 
+fn perplexity_from_xprs_app_info(
+    app_info: &ExpressAppInfo,
+    log: &slog::Logger,
+) -> EqClassCollectionEval {
+    let smoothing_strategy = &app_info.smoothing_strategy;
+    info!(log, "Smoothing strategy {:?}", &smoothing_strategy);
+
+    let smoothing_strategy = {
+        match app_info.smoothing_strategy.as_str() {
+            "TX" => {
+                let smoothing_param = app_info.smoothing_param.unwrap();
+                info!(log, "Smoothing parameter {:?}", &smoothing_param);
+                Some(Box::new(PerTxpSmoother::new(smoothing_param)) as Box<dyn SmoothingStrategy>)
+            }
+            "TPM" => {
+                let smoothing_param = app_info.smoothing_param.unwrap();
+                info!(log, "Smoothing parameter {:?}", &smoothing_param);
+                Some(Box::new(PerTPMSmoother::new(smoothing_param)) as Box<dyn SmoothingStrategy>)
+            }
+            "LGT" => Some(Box::new(SGTSmoother::new()) as Box<dyn SmoothingStrategy>),
+            _ => None,
+        }
+    };
+
+    let smoothing_strategy = smoothing_strategy.unwrap();
+
+    info!(log, "Loading quants from {:?}", &app_info.quant_path);
+    let quant_map = load_express_quants(&app_info.quant_path).unwrap();
+    let txs_w_mapped_reads = load_express_txps_w_mapped_reads(&app_info.quant_path).unwrap();
+
+    info!(
+        log,
+        "Loading held-out ECs from {:?}", &app_info.val_ecs_path
+    );
+    let te_ecs = EqClassCollection::from_path(&app_info.val_ecs_path).unwrap();
+
+    let ec_eval_results = perplexity(
+        te_ecs,
+        &quant_map,
+        &txs_w_mapped_reads,
+        smoothing_strategy.as_ref(),
+        &log,
+    );
+    ec_eval_results
+}
 pub fn mapped_txs(ecs: &EqClassCollection) -> HashSet<String> {
     let mut set = HashSet::new();
     for ec in ecs.classes.iter() {
@@ -144,20 +328,15 @@ pub fn mapped_txs(ecs: &EqClassCollection) -> HashSet<String> {
 pub fn perplexity(
     ecs: EqClassCollection,
     quant_map: &HashMap<String, QuantEntry>,
-    train_ecs: &EqClassCollection,
-    alpha_smooth: f64,
-    smooth_per_tx: bool,
-    log: &slog::Logger,
+    txs_w_mapped_reads: &HashSet<String>,
+    smoothing_strategy: &dyn SmoothingStrategy,
+    _log: &slog::Logger,
 ) -> EqClassCollectionEval {
-    let train_txs = mapped_txs(train_ecs);
-
-    let smoothed_quant_map = if smooth_per_tx {
-        per_tx_smoothing(quant_map, alpha_smooth)
-    } else {
-        per_TPM_smoothing(quant_map, alpha_smooth)
-    };
+    let train_txs = txs_w_mapped_reads;
+    let smoothed_quant_map = smoothing_strategy.smooth_quants(quant_map);
 
     let mut results = Vec::new();
+
     // For each EC
     for ec in ecs.classes.iter() {
         let EqClassView {
@@ -181,8 +360,8 @@ pub fn perplexity(
             ec_perp += w * eta;
 
             // smoothed probability
-            let eta = smoothed_quant_map[t].tpm / 1e6;
-            ec_perp_smooth += w * eta;
+            let eta_smooth = smoothed_quant_map[t].tpm / 1e6;
+            ec_perp_smooth += w * eta_smooth;
         }
 
         let class = held_out_ec_class(ec_perp, &label_names, &train_txs);
@@ -202,6 +381,7 @@ pub fn perplexity(
             count,
             class,
         };
+
         results.push(eval_info);
     }
 
@@ -248,65 +428,6 @@ pub fn held_out_ec_class(
     } else {
         panic!("Zero length EC label");
     }
-}
-
-pub fn per_tx_smoothing(
-    quant_map: &HashMap<String, QuantEntry>,
-    alpha: f64,
-) -> HashMap<String, QuantEntry> {
-    let mut smoothed_quants = HashMap::new();
-
-    // compute the new denominator
-    let mut denom = 0.0;
-    for (_, v) in quant_map.iter() {
-        denom += (v.num_reads + alpha) / v.efflen;
-    }
-
-    for (k, v) in quant_map.iter() {
-        let num_reads = v.num_reads + alpha;
-        let tpm = 1e6 * num_reads / v.efflen / denom;
-        let smoothed_entry = QuantEntry {
-            tpm,
-            num_reads,
-            efflen: v.efflen,
-            len: v.len,
-        };
-        smoothed_quants.insert(k.clone(), smoothed_entry);
-    }
-    smoothed_quants
-}
-
-pub fn per_TPM_smoothing(
-    quant_map: &HashMap<String, QuantEntry>,
-    alpha: f64,
-) -> HashMap<String, QuantEntry> {
-    let mut smoothed_quants = HashMap::new();
-
-    let m = quant_map.len();
-
-    let denom = 1. + (m as f64 * alpha);
-
-    // reconstituted counts
-    let mut total_reads = 0.;
-    for (_, v) in quant_map.iter() {
-        total_reads = total_reads + v.num_reads;
-    }
-
-    for (k, v) in quant_map.iter() {
-        let eta = ((v.tpm / 1e6) + alpha) / denom;
-        let tpm = eta * 1e6;
-        let num_reads = total_reads * eta;
-
-        let smoothed_entry = QuantEntry {
-            tpm,
-            num_reads,
-            efflen: v.efflen,
-            len: v.len,
-        };
-        smoothed_quants.insert(k.clone(), smoothed_entry);
-    }
-
-    smoothed_quants
 }
 
 pub fn perplexity_summary(results: &EqClassCollectionEval) -> ResultSummary {
