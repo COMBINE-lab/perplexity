@@ -40,14 +40,14 @@ fn app() -> App<'static, 'static> {
         .arg(
             Arg::from_usage("-m, --smoothing_strategy=<mode> 'One of {TX, TPM, LGT}'")
                 .required(false)
-                .default_value("TPM"),
+                .default_value("LGT"),
         )
         .arg(Arg::from_usage("-o --output=<output> 'Write results to output'").required(true));
 
     let xprs_app = App::new("eval-xprs")
         .version(version)
         .author(crate_authors)
-        .arg(Arg::from_usage("--quants=<train_ecs> 'Training set quant.sf'").required(true))
+        .arg(Arg::from_usage("--quants=<train_ecs> 'eXpress quant file'").required(true))
         .arg(
             Arg::from_usage("--test_ecs=<test_salmon_dir> 'Test set equivalence class file'")
                 .required(true),
@@ -60,7 +60,7 @@ fn app() -> App<'static, 'static> {
         .arg(
             Arg::from_usage("-m, --smoothing_strategy=<mode> 'One of {TX, TPM, LGT}'")
                 .required(false)
-                .default_value("TPM"),
+                .default_value("LGT"),
         )
         .arg(Arg::from_usage("-o --output=<output> 'Write results to output'").required(true));
 
