@@ -1,5 +1,5 @@
 [package]
-name = "shoal"
+name = "perplexity"
 version = "0.1.0"
 authors = ["Jason Fan <jasonfan@umd.edu>"]
 edition = "2018"
