@@ -4,20 +4,22 @@
 
 ```
 USAGE:
-    perplexity eval [FLAGS] [OPTIONS] --output <output> --quants <train_ecs> --test_ecs <test_salmon_dir> --train_ecs <train_ecs>
+    perplexity eval [OPTIONS] --output <output> --quants <train_ecs> --test_ecs <test_salmon_dir> --train_ecs <train_ecs>
 
 FLAGS:
-    -h, --help             Prints help information
-    -t, --smooth_per_tx    use reads per tx smoothing
-    -V, --version          Prints version information
+    -h, --help       Prints help information
+    -V, --version    Prints version information
 
 OPTIONS:
-    -o, --output <output>               output results path
-        --quants <train_ecs>            Training set quants
-        --smoothing <smoothing>         TPM based smoothing [default: 1e-8]
-        --test_ecs <test_salmon_dir>    Test set equivalence class counts
-        --train_ecs <train_ecs>         Training set equivalence class counts
+    -o, --output <output>               Write results to output
+        --quants <train_ecs>            Training set quant.sf
+        --smoothing <smoothing>         Smoothing parameter for various strategies [default: 1e-8]
+    -m, --smoothing_strategy <mode>     One of {TX, TPM, LGT} [default: LGT]
+        --test_ecs <test_salmon_dir>    Test set equivalence class file
+        --train_ecs <train_ecs>         Training set equivalence class file
 ```
+
+Use `perplexity --help` for more options
 
 ## Snakemake workflow Usage
 
